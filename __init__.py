@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from bson.objectid import ObjectId
 import uuid
 from dotenv import load_dotenv
+import cv2
 load_dotenv()
 
 
@@ -127,6 +128,8 @@ class ExtendedPluginClass(PluginClass):
                                              models_path + '/mymodel_1.pth',
                                              extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.7],
                                              label_map={0: "Label", 1: "Manuscrito", 2: "Text"})
+            
+            ocr_agent = lp.TesseractAgent(languages='spa')
 
             for record in records:
 
@@ -153,8 +156,6 @@ class ExtendedPluginClass(PluginClass):
 
                     layout = model.detect(image)
 
-                    print(layout)
-
                     text_blocks = lp.Layout(
                         [b for b in layout if b.type == 'Text'])
                     manual_blocks = lp.Layout(
@@ -176,16 +177,52 @@ class ExtendedPluginClass(PluginClass):
                                 'y': b.block.y_1 / image_height,
                                 'width': (b.block.x_2 - b.block.x_1) / image_width,
                                 'height': (b.block.y_2 - b.block.y_1) / image_height
-                            }
+                            },
+                            'words': [{
+                                'text': s['text'],
+                                'bbox': {
+                                    'x': s['left'] / image_width,
+                                    'y': s['top'] / image_height,
+                                    'width': s['width'] / image_width,
+                                    'height': s['height'] / image_height
+                                }
+                            } for s in segment_words]
                         }
                         return obj
+                    
+                    def segment_image(b, image):
+                        segment_image = (
+                            b.pad(left=5, right=5, top=5,
+                                bottom=5).crop_image(image)
+                        )
+
+                        segment_text = ocr_agent.detect(
+                            segment_image, return_response=True, return_only_text=False)
+                        
+                        txt = segment_text['text']
+                        words = []
+
+                        for index, row in segment_text['data'].iterrows():
+                            if row['text'] != '':
+                                words.append({
+                                    'text': row['text'],
+                                    'left': row['left'],
+                                    'top': row['top'],
+                                    'width': row['width'],
+                                    'height': row['height']
+                                })
+
+                        for w in words:
+                            w['left'] += b.block.x_1
+                            w['top'] += b.block.y_1
+
+                        return txt, words
                     
 
                     
 
                     for b in text_blocks:
-                        txt = ''
-                        segment_words = []
+                        txt, segment_words = segment_image(b, image)
 
                         obj = get_obj(b, txt, 'text', segment_words)
 
@@ -200,8 +237,7 @@ class ExtendedPluginClass(PluginClass):
                         resp_page.append(obj)
                     
                     for b in label_blocks:
-                        txt = ''
-                        segment_words = []
+                        txt, segment_words = segment_image(b, image)
 
                         obj = get_obj(b, txt, 'label', segment_words)
 
