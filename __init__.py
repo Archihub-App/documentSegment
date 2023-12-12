@@ -65,6 +65,23 @@ class ExtendedPluginClass(PluginClass):
             
             return {'msg': 'Se agregó la tarea a la fila de procesamientos'}, 201
         
+        @self.route('/anomgenerate_template_1', methods=['POST'])
+        @jwt_required()
+        def anomgenerate_template_1():
+            current_user = get_jwt_identity()
+            body = request.get_json()
+
+            if 'id' not in body:
+                return {'msg': 'No se especificó el archivo'}, 400
+
+            if not self.has_role('admin', current_user) and not self.has_role('processing', current_user):
+                return {'msg': 'No tiene permisos suficientes'}, 401
+            
+            task = self.anom_1.delay(body, current_user)
+            self.add_task_to_user(task.id, 'documentSegment.anomgenerate_template_1', current_user, 'file_download')
+            
+            return {'msg': 'Se agregó la tarea a la fila de procesamientos'}, 201
+        
         @self.route('/filedownload/<taskId>', methods=['GET'])
         @jwt_required()
         def file_download(taskId):
@@ -309,13 +326,11 @@ class ExtendedPluginClass(PluginClass):
             for block in page['blocks']:
                 labels = [block['type']]
                 if any(label in hidden_labels for label in labels):
-                    # draw a rectangle around the block in the image, the coordinates are relative to the image and are x,y,width,height
                     x = block['bbox']['x'] * img.width
                     y = block['bbox']['y'] * img.height
                     w = block['bbox']['width'] * img.width
                     h = block['bbox']['height'] * img.height
                     draw.rectangle((x, y, x + w, y + h), fill='black')
-                    # write the label in the image
                     # draw.text((x + (w / 2), y + (h / 2)), block['type'], fill='black')
 
 
@@ -329,6 +344,87 @@ class ExtendedPluginClass(PluginClass):
 
 
         return '/' + user + '/documentSegmentAnom/' + file_id + '.pdf'
+
+    @shared_task(ignore_result=False, name='documentSegment.anomgenerate_template_1')
+    def anom_1(body, user):
+        def check_nearby_words(block, word, distance, blocks):
+            for b in blocks:
+                if b['type'] == 'label':
+                    for word_block in b['words']:
+                        word_1 = word_block['text'].lower()
+                        word_2 = word.lower()
+
+                        if word_2 in word_1:
+                            if abs(word_block['bbox']['x'] - block['bbox']['x']) <= distance and abs(word_block['bbox']['y'] - block['bbox']['y']) <= distance:
+                                return False
+            return True
+
+        record = mongodb.get_record('records', {'_id': ObjectId(body['id'])}, fields={
+            '_id': 1, 'mime': 1, 'filepath': 1, 'processing': 1
+        })
+
+        if 'processing' not in record:
+            return {'msg': 'Registro no tiene procesamientos'}, 404
+        if 'fileProcessing' not in record['processing']:
+            return {'msg': 'Registro no tiene procesamiento de archivo'}, 404
+        if 'documentSegment' not in record['processing']:
+            return {'msg': 'Registro no tiene procesamiento de extracción de entidades nombradas'}, 404
+
+        path = WEB_FILES_PATH + '/' + \
+                    record['processing']['fileProcessing']['path'] + '/web/big'
+        path_original = ORIGINAL_FILES_PATH + '/' + \
+                    record['processing']['fileProcessing']['path'] + '.pdf'
+        
+        files = os.listdir(path)
+
+        folder_path = USER_FILES_PATH + '/' + user + '/documentSegmentAnom'
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
+        file_id = str(uuid.uuid4())
+
+        pdf_path = folder_path + '/' + file_id + '.pdf'
+
+        step = 0
+        images = []
+
+        pages = record['processing']['documentSegment']['result']
+
+        hidden_labels = ['manuscrito']
+
+        for file in files:
+            step += 1
+            page = pages[step - 1]
+            img = Image.open(os.path.join(path, file))
+            draw = ImageDraw.Draw(img)
+
+            for block in page['blocks']:
+                labels = [block['type']]
+                if any(label in hidden_labels for label in labels):
+                    x = block['bbox']['x'] * img.width
+                    y = block['bbox']['y'] * img.height
+                    w = block['bbox']['width'] * img.width
+                    h = block['bbox']['height'] * img.height
+
+                    anom = True
+                    anom = check_nearby_words(block, 'abogado', 0.2, page['blocks'])
+
+                    if anom:
+                        draw.rectangle((x, y, x + w, y + h), fill='black')
+                    # draw.text((x + (w / 2), y + (h / 2)), block['type'], fill='black')
+
+
+            images.append(img)
+        
+
+        images[0].save(
+            pdf_path, "PDF" ,resolution=100.0, save_all=True, append_images=images[1:]
+        )
+
+
+
+        return '/' + user + '/documentSegmentAnom/' + file_id + '.pdf'
+
 
 plugin_info = {
     'name': 'Segmentación en documentos escaneados PDF',
@@ -349,6 +445,13 @@ plugin_info = {
                 'id': 'overwrite',
                 'default': False,
                 'required': False,
+            },
+            {
+                'type': 'button',
+                'label': 'Generar versión anonimizada con plantilla 01',
+                'id': 'generate',
+                'callback': 'anomgenerate_bulk_template_1',
+                'params': ['template_01']
             }
         ],
         'settings_detail': [
@@ -368,7 +471,15 @@ plugin_info = {
                 'type': 'button',
                 'label': 'Generar versión anonimizada',
                 'id': 'generate',
-                'callback': 'anomgenerate'
+                'callback': 'anomgenerate',
+                'params': None
+            },
+            {
+                'type': 'button',
+                'label': 'Generar versión anonimizada con plantilla 01',
+                'id': 'generate',
+                'callback': 'anomgenerate_template_1',
+                'params': ['template_01']
             }
         ]
     }
