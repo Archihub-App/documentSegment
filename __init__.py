@@ -14,6 +14,7 @@ from bson.objectid import ObjectId
 import uuid
 from dotenv import load_dotenv
 import cv2
+from zipfile import ZipFile
 load_dotenv()
 
 
@@ -78,6 +79,23 @@ class ExtendedPluginClass(PluginClass):
                 return {'msg': 'No tiene permisos suficientes'}, 401
             
             task = self.anom_1.delay(body, current_user)
+            self.add_task_to_user(task.id, 'documentSegment.anomgenerate_template_1', current_user, 'file_download')
+            
+            return {'msg': 'Se agregó la tarea a la fila de procesamientos'}, 201
+        
+        @self.route('/anomgenerate_bulk_template_1', methods=['POST'])
+        @jwt_required()
+        def anomgenerate_bulk_template_1():
+            current_user = get_jwt_identity()
+            body = request.get_json()
+
+            if 'post_type' not in body:
+                return {'msg': 'No se especificó el archivo'}, 400
+
+            if not self.has_role('admin', current_user) and not self.has_role('processing', current_user):
+                return {'msg': 'No tiene permisos suficientes'}, 401
+            
+            task = self.bulk_anom_1.delay(body, current_user)
             self.add_task_to_user(task.id, 'documentSegment.anomgenerate_template_1', current_user, 'file_download')
             
             return {'msg': 'Se agregó la tarea a la fila de procesamientos'}, 201
@@ -284,6 +302,12 @@ class ExtendedPluginClass(PluginClass):
 
     @shared_task(ignore_result=False, name='documentSegment.anomgenerate')
     def anom(body, user):
+        def check_disable_anom(block):
+            if 'disableAnom' in block:
+                if block['disableAnom']:
+                    return False
+            return True
+        
         record = mongodb.get_record('records', {'_id': ObjectId(body['id'])}, fields={
             '_id': 1, 'mime': 1, 'filepath': 1, 'processing': 1
         })
@@ -330,7 +354,12 @@ class ExtendedPluginClass(PluginClass):
                     y = block['bbox']['y'] * img.height
                     w = block['bbox']['width'] * img.width
                     h = block['bbox']['height'] * img.height
-                    draw.rectangle((x, y, x + w, y + h), fill='black')
+
+                    anom = True
+                    anom = check_disable_anom(block)
+
+                    if anom:
+                        draw.rectangle((x, y, x + w, y + h), fill='black')
                     # draw.text((x + (w / 2), y + (h / 2)), block['type'], fill='black')
 
 
@@ -347,16 +376,22 @@ class ExtendedPluginClass(PluginClass):
 
     @shared_task(ignore_result=False, name='documentSegment.anomgenerate_template_1')
     def anom_1(body, user):
-        def check_nearby_words(block, word, distance, blocks):
+        def check_nearby_words(block, word, distance_x, distance_y, blocks):
             for b in blocks:
                 if b['type'] == 'label':
                     for word_block in b['words']:
                         word_1 = word_block['text'].lower()
                         word_2 = word.lower()
 
-                        if word_2 in word_1:
-                            if abs(word_block['bbox']['x'] - block['bbox']['x']) <= distance and abs(word_block['bbox']['y'] - block['bbox']['y']) <= distance:
+                        if word_2 in word_1 or word_2 == word_1:
+                            if abs(word_block['bbox']['x'] - block['bbox']['x']) <= distance_x and abs(word_block['bbox']['y'] - block['bbox']['y']) <= distance_y:
                                 return False
+            return True
+        
+        def check_disable_anom(block):
+            if 'disableAnom' in block:
+                if block['disableAnom']:
+                    return False
             return True
 
         record = mongodb.get_record('records', {'_id': ObjectId(body['id'])}, fields={
@@ -407,7 +442,9 @@ class ExtendedPluginClass(PluginClass):
                     h = block['bbox']['height'] * img.height
 
                     anom = True
-                    anom = check_nearby_words(block, 'abogado', 0.2, page['blocks'])
+                    anom = check_nearby_words(block, 'abogado', 0.15, 0.1, page['blocks'])
+                    if anom:
+                        anom = check_disable_anom(block)
 
                     if anom:
                         draw.rectangle((x, y, x + w, y + h), fill='black')
@@ -424,6 +461,123 @@ class ExtendedPluginClass(PluginClass):
 
 
         return '/' + user + '/documentSegmentAnom/' + file_id + '.pdf'
+
+    @shared_task(ignore_result=False, name='documentSegment.anomgenerate_bulk_template_1')
+    def bulk_anom_1(body, user):
+        def check_nearby_words(block, word, distance_x, distance_y, blocks):
+            for b in blocks:
+                if b['type'] == 'label':
+                    for word_block in b['words']:
+                        word_1 = word_block['text'].lower()
+                        word_2 = word.lower()
+
+                        if word_2 in word_1:
+                            if abs(word_block['bbox']['x'] - block['bbox']['x']) <= distance_x and abs(word_block['bbox']['y'] - block['bbox']['y']) <= distance_y:
+                                return False
+            return True
+        
+        def check_disable_anom(block):
+            if 'disableAnom' in block:
+                if block['disableAnom']:
+                    return False
+            return True
+
+        filters = {
+            'post_type': body['post_type']
+        }
+
+        if 'parent' in body:
+            if body['parent']:
+                filters['parents.id'] = body['parent']
+
+        # obtenemos los recursos
+        resources = list(mongodb.get_all_records(
+            'resources', filters, fields={'_id': 1}))
+        resources = [str(resource['_id']) for resource in resources]
+
+        records_filters = {
+            'parent.id': {'$in': resources},
+            'processing.fileProcessing': {'$exists': True},
+            '$or': [{'processing.fileProcessing.type': 'document'}]
+        }
+
+        records = list(mongodb.get_all_records('records', records_filters, fields={
+            '_id': 1, 'mime': 1, 'filepath': 1, 'processing': 1}))
+        
+        if len(records) > 0:
+            exported_files = []
+            for record in records:
+
+                if 'processing' not in record:
+                    return {'msg': 'Registro no tiene procesamientos'}, 404
+                if 'fileProcessing' not in record['processing']:
+                    return {'msg': 'Registro no tiene procesamiento de archivo'}, 404
+                if 'documentSegment' not in record['processing']:
+                    return {'msg': 'Registro no tiene procesamiento de extracción de entidades nombradas'}, 404
+
+                path = WEB_FILES_PATH + '/' + \
+                            record['processing']['fileProcessing']['path'] + '/web/big'
+                path_original = ORIGINAL_FILES_PATH + '/' + \
+                            record['processing']['fileProcessing']['path'] + '.pdf'
+                
+                files = os.listdir(path)
+
+                folder_path = USER_FILES_PATH + '/' + user + '/documentSegmentAnom'
+                if not os.path.exists(folder_path):
+                    os.makedirs(folder_path)
+
+                file_id = str(uuid.uuid4())
+
+                pdf_path = folder_path + '/' + file_id + '.pdf'
+
+                step = 0
+                images = []
+
+                pages = record['processing']['documentSegment']['result']
+
+                hidden_labels = ['manuscrito']
+
+                for file in files:
+                    step += 1
+                    page = pages[step - 1]
+                    img = Image.open(os.path.join(path, file))
+                    draw = ImageDraw.Draw(img)
+
+                    for block in page['blocks']:
+                        labels = [block['type']]
+                        if any(label in hidden_labels for label in labels):
+                            x = block['bbox']['x'] * img.width
+                            y = block['bbox']['y'] * img.height
+                            w = block['bbox']['width'] * img.width
+                            h = block['bbox']['height'] * img.height
+
+                            anom = True
+                            anom = check_nearby_words(block, 'abogado', 0.15, 0.1, page['blocks'])
+                            if anom:
+                                anom = check_disable_anom(block)
+
+                            if anom:
+                                draw.rectangle((x, y, x + w, y + h), fill='black')
+                            # draw.text((x + (w / 2), y + (h / 2)), block['type'], fill='black')
+
+
+                    images.append(img)
+                
+
+                images[0].save(
+                    pdf_path, "PDF" ,resolution=100.0, save_all=True, append_images=images[1:]
+                )
+
+                exported_files.append(pdf_path)
+
+            zip_id = str(uuid.uuid4())
+            zip_path = folder_path + '/' + zip_id + '.zip'
+            with ZipFile(zip_path, 'w') as zipObj:
+                for file in exported_files:
+                    zipObj.write(file)
+                    os.remove(file)
+
+        return '/' + user + '/documentSegmentAnom/' + zip_id + '.zip'
 
 
 plugin_info = {
