@@ -582,7 +582,7 @@ class ExtendedPluginClass(PluginClass):
 
 plugin_info = {
     'name': 'Segmentación en documentos escaneados PDF',
-    'description': 'Plugin para identificar segmentos de un documento y generar una versión anonimizada.',
+    'description': 'Plugin para identificar segmentos de un documento con manuscritos y generar una versión anonimizada.',
     'version': '0.1',
     'author': 'Néstor Andrés Peña',
     'type': ['bulk'],
